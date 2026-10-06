@@ -1,0 +1,29 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+.pnpm-debug.log*
+
+# Dependencies
+node_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Coverage and test output
+coverage
+test-results/
+playwright-report/
+
+# Build output
+dist
+
+# macOS
+.DS_Store
+
+# Wrangler
+.wrangler/
+.env*
+!.env.example
+.dev.vars*
+!.dev.vars.example
