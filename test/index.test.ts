@@ -5,6 +5,7 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { VERSION } from "../src/ipscanner";
 
 const API = "https://ipscanner.io";
 
@@ -139,6 +140,8 @@ describe("monitor mode", () => {
 		expect(agent.method).toBe("POST");
 		expect(agent.headers.get("authorization")).toBe("Bearer test-key");
 		expect(agent.headers.get("content-type")).toBe("application/json");
+		expect(agent.headers.get("x-ipscanner-source")).toBe("cloudflare_worker");
+		expect(agent.headers.get("user-agent")).toBe(`ipscanner-cloudflare/${VERSION}`);
 		const body = JSON.parse(agent.body);
 		expect(body.ip).toBe("203.0.113.3");
 		expect(body.user_agent).toBe("Mozilla/5.0 test");

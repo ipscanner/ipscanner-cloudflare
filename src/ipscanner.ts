@@ -27,7 +27,8 @@ export type Outcome<T> =
 	| { ok: false; status: "error" | "timeout" };
 
 const CACHE_HOST = "https://ipscanner-cache.invalid";
-const USER_AGENT = "ipscanner-cloudflare/0.1.0";
+export const VERSION = "0.2.0";
+const USER_AGENT = `ipscanner-cloudflare/${VERSION}`;
 
 async function sha256(input: string): Promise<string> {
 	const digest = await crypto.subtle.digest(
@@ -47,6 +48,7 @@ async function post<T>(cfg: Config, path: string, body: unknown): Promise<T> {
 			"Content-Type": "application/json",
 			Accept: "application/json",
 			"User-Agent": USER_AGENT,
+			"X-IPScanner-Source": "cloudflare_worker",
 		},
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(cfg.timeoutMs),
