@@ -1,6 +1,6 @@
 {
 	"name": "ipscanner-cloudflare",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Edge guard that runs IPScanner Agentscan and IP Detection on every visitor, then annotates or blocks requests before they reach your origin.",
 	"cloudflare": {
 		"label": "IPScanner Edge Guard",

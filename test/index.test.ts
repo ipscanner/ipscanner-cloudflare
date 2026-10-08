@@ -245,6 +245,22 @@ describe("enforce mode", () => {
 			200,
 		);
 	});
+
+	it("leaves anonymized hosting and private relays alone", async () => {
+		const vars = { ...enforce, BLOCK_ANONYMIZED: "true" };
+		for (const [ip, networkClass] of [
+			["203.0.113.30", "hosting"],
+			["203.0.113.31", "relay"],
+		]) {
+			ipReply = () =>
+				json({
+					...cleanIp,
+					networkClass,
+					verdict: { ...cleanIp.verdict, anonymized: true },
+				});
+			expect((await send("/", { ip, vars })).status).toBe(200);
+		}
+	});
 });
 
 describe("fail open", () => {
@@ -442,7 +458,7 @@ describe("sites", () => {
 		expect(edge.method).toBe("POST");
 		expect(edge.headers.get("authorization")).toBe("Bearer test-key");
 		expect(edge.headers.get("x-ipscanner-source")).toBe("cloudflare_worker");
-		expect(edge.headers.get("user-agent")).toBe("ipscanner-cloudflare/0.3.0");
+		expect(edge.headers.get("user-agent")).toBe(`ipscanner-cloudflare/${VERSION}`);
 		expect(JSON.parse(edge.body)).toEqual({
 			site,
 			ip: "198.51.100.200",

@@ -110,11 +110,16 @@ export function shouldBlock(
 		(agent.action === "block" || cfg.blockClasses.includes(agent.class))
 	)
 		return true;
-	return (
-		cfg.blockAnonymized &&
-		(agent?.signals?.anonymized === true || ip?.verdict?.anonymized === true)
-	);
+	if (!cfg.blockAnonymized) return false;
+	if (ip?.networkClass) return MASKING.has(ip.networkClass);
+	const origin = agent?.signals?.network_origin;
+	if (typeof origin === "string") return MASKING.has(origin);
+	return agent?.signals?.anonymized === true;
 }
+
+// Hosting and private relays are anonymized too, but BLOCK_ANONYMIZED means
+// VPN, proxy and Tor.
+const MASKING = new Set(["vpn", "residential_proxy", "tor"]);
 
 export type SiteAction = "allow" | "flag" | "block";
 

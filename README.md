@@ -107,7 +107,7 @@ Without `SITE_ID`, in `enforce` mode a visitor gets a 403 page with the request 
 
 - Agentscan returns `action: block`, or
 - the class is listed in `BLOCK_CLASSES`, or
-- `BLOCK_ANONYMIZED` is `true` and either check reports the IP as anonymized.
+- `BLOCK_ANONYMIZED` is `true` and the IP is a VPN, residential proxy or Tor exit (anonymized hosting and private relays are not blocked by this flag).
 
 A visitor whose Agentscan signals include `allowlist_verified: true` is always allowed.
 

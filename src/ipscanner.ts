@@ -52,7 +52,7 @@ export type Outcome<T> =
 	| { ok: false; status: "error" | "timeout" };
 
 const CACHE_HOST = "https://ipscanner-cache.invalid";
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 const USER_AGENT = `ipscanner-cloudflare/${VERSION}`;
 
 async function sha256(input: string): Promise<string> {
