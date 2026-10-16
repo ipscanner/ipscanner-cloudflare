@@ -1,12 +1,10 @@
 import { type Config, loadConfig } from "./config";
 import {
 	type AgentResult,
-	checkAgent,
 	checkEdge,
+	type EdgeNetwork,
 	type EdgeResult,
 	getPolicy,
-	type IpResult,
-	lookupIp,
 	type SitePolicy,
 } from "./ipscanner";
 
@@ -102,7 +100,7 @@ function ja4(request: Request): string | undefined {
 export function shouldBlock(
 	cfg: Config,
 	agent?: AgentResult,
-	ip?: IpResult,
+	network?: EdgeNetwork,
 ): boolean {
 	if (agent?.signals?.allowlist_verified === true) return false;
 	if (
@@ -111,7 +109,7 @@ export function shouldBlock(
 	)
 		return true;
 	if (!cfg.blockAnonymized) return false;
-	if (ip?.networkClass) return MASKING.has(ip.networkClass);
+	if (network?.networkClass) return MASKING.has(network.networkClass);
 	const origin = agent?.signals?.network_origin;
 	if (typeof origin === "string") return MASKING.has(origin);
 	return agent?.signals?.anonymized === true;
@@ -120,6 +118,29 @@ export function shouldBlock(
 // Hosting and private relays are anonymized too, but BLOCK_ANONYMIZED means
 // VPN, proxy and Tor.
 const MASKING = new Set(["vpn", "residential_proxy", "tor"]);
+
+function annotate(
+	headers: Headers,
+	agent?: AgentResult,
+	network?: EdgeNetwork,
+): string | undefined {
+	const networkClass =
+		network?.networkClass ??
+		(agent?.signals?.network_origin as string | undefined);
+	const anonymized =
+		network?.anonymized === true || agent?.signals?.anonymized === true;
+	if (agent) {
+		headers.set("X-IPScanner-Class", agent.class);
+		headers.set("X-IPScanner-Action", agent.action);
+		headers.set("X-IPScanner-Confidence", String(agent.confidence));
+	}
+	if (networkClass) headers.set("X-IPScanner-Network-Class", networkClass);
+	headers.set("X-IPScanner-Anonymized", String(anonymized));
+	if (typeof network?.riskScore === "number")
+		headers.set("X-IPScanner-Risk", String(network.riskScore));
+	if (network?.country) headers.set("X-IPScanner-Country", network.country);
+	return networkClass;
+}
 
 export type SiteAction = "allow" | "flag" | "block";
 
@@ -181,29 +202,14 @@ async function checkSite(
 
 	const verdict = outcome.data;
 	const agent = verdict.agent ?? undefined;
-	const network = verdict.network ?? undefined;
-	const networkClass =
-		network?.networkClass ??
-		(agent?.signals?.network_origin as string | undefined);
-	const anonymized =
-		network?.anonymized === true || agent?.signals?.anonymized === true;
-
-	if (agent) {
-		headers.set("X-IPScanner-Class", agent.class);
-		headers.set("X-IPScanner-Action", agent.action);
-		headers.set("X-IPScanner-Confidence", String(agent.confidence));
-	}
-	if (networkClass) headers.set("X-IPScanner-Network-Class", networkClass);
-	headers.set("X-IPScanner-Anonymized", String(anonymized));
-	if (typeof network?.riskScore === "number")
-		headers.set("X-IPScanner-Risk", String(network.riskScore));
-	if (network?.country) headers.set("X-IPScanner-Country", network.country);
+	const networkClass = annotate(headers, agent, verdict.network ?? undefined);
 	if (verdict.class) headers.set("X-IPScanner-Traffic-Class", verdict.class);
 	headers.set("X-IPScanner-Site", cfg.siteId);
 	headers.set("X-IPScanner-Status", "ok");
 
 	const action = siteAction(verdict, policy.policy);
-	const enforce = policy.policy?.mode === "enforce";
+	const enforce =
+		verdict.mode !== "monitor" && policy.policy?.mode === "enforce";
 	const decision =
 		action === "allow" ? "allow" : enforce ? action : `would_${action}`;
 	if (decision === "flag") headers.set("X-IPScanner-Action", "flag");
@@ -217,6 +223,7 @@ async function checkSite(
 			action: agent?.action,
 			networkClass,
 			decision,
+			mode: verdict.mode,
 			policy: { source: policy.source, version: policy.policy?.version },
 			cache: { edge: outcome.cached ? "hit" : "miss" },
 		}),
@@ -261,56 +268,43 @@ export default {
 			return checkSite(request, headers, cfg, ctx, url, ip);
 
 		const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
-		const [agentOutcome, ipOutcome] = await Promise.all([
-			cfg.checkAgent
-				? checkAgent(cfg, ctx, {
-						ip,
-						userAgent: request.headers.get("user-agent") ?? "",
-						ja4: ja4(request),
-						headers: agentHeaders(request.headers),
-						requestId,
-					})
-				: undefined,
-			cfg.checkIp ? lookupIp(cfg, ctx, ip) : undefined,
-		]);
+		const outcome = await checkEdge(
+			cfg,
+			ctx,
+			{
+				ip,
+				userAgent: request.headers.get("user-agent") ?? "",
+				ja4: ja4(request),
+				headers: agentHeaders(request.headers),
+				requestId,
+			},
+			AbortSignal.timeout(cfg.timeoutMs),
+		);
 
-		const failure = [agentOutcome, ipOutcome].find((o) => o && !o.ok);
-		if (failure && !failure.ok) {
-			headers.set("X-IPScanner-Status", failure.status);
+		if (!outcome.ok) {
+			headers.set("X-IPScanner-Status", outcome.status);
 			console.log(
 				JSON.stringify({
 					ip,
 					path: url.pathname,
-					status: failure.status,
+					status: outcome.status,
 					decision: "allow",
 				}),
 			);
 			return forward(request, headers, cfg, url);
 		}
 
-		const agent = agentOutcome?.ok ? agentOutcome.data : undefined;
-		const lookup = ipOutcome?.ok ? ipOutcome.data : undefined;
-		const networkClass =
-			lookup?.networkClass ??
-			(agent?.signals?.network_origin as string | undefined);
-		const anonymized =
-			lookup?.verdict?.anonymized === true ||
-			agent?.signals?.anonymized === true;
-
-		if (agent) {
-			headers.set("X-IPScanner-Class", agent.class);
-			headers.set("X-IPScanner-Action", agent.action);
-			headers.set("X-IPScanner-Confidence", String(agent.confidence));
-		}
-		if (networkClass) headers.set("X-IPScanner-Network-Class", networkClass);
-		headers.set("X-IPScanner-Anonymized", String(anonymized));
-		if (lookup) headers.set("X-IPScanner-Risk", String(lookup.riskScore));
-		if (lookup?.geo?.countryCode)
-			headers.set("X-IPScanner-Country", lookup.geo.countryCode);
+		const verdict = outcome.data;
+		const agent = cfg.checkAgent ? (verdict.agent ?? undefined) : undefined;
+		const network = cfg.checkIp ? (verdict.network ?? undefined) : undefined;
+		const networkClass = annotate(headers, agent, network);
 		headers.set("X-IPScanner-Status", "ok");
 
-		const block = shouldBlock(cfg, agent, lookup);
-		const decision = block ? (cfg.enforce ? "block" : "would_block") : "allow";
+		const block = shouldBlock(cfg, agent, network);
+		// The api answers monitor for an account that may not block (Free after its trial).
+		const enforce = cfg.enforce && verdict.mode !== "monitor";
+		const decision = block ? (enforce ? "block" : "would_block") : "allow";
+		const cache = outcome.cached ? "hit" : "miss";
 		console.log(
 			JSON.stringify({
 				ip,
@@ -319,18 +313,15 @@ export default {
 				action: agent?.action,
 				networkClass,
 				decision,
+				mode: verdict.mode,
 				cache: {
-					agent: agentOutcome?.ok
-						? agentOutcome.cached
-							? "hit"
-							: "miss"
-						: undefined,
-					ip: ipOutcome?.ok ? (ipOutcome.cached ? "hit" : "miss") : undefined,
+					agent: cfg.checkAgent ? cache : undefined,
+					ip: cfg.checkIp ? cache : undefined,
 				},
 			}),
 		);
 
-		if (block && cfg.enforce) return blocked(requestId);
+		if (block && enforce) return blocked(requestId);
 		return forward(request, headers, cfg, url);
 	},
 } satisfies ExportedHandler<Env>;

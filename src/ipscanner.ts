@@ -7,13 +7,6 @@ export interface AgentResult {
 	signals: Record<string, unknown>;
 }
 
-export interface IpResult {
-	networkClass: string;
-	riskScore: number;
-	verdict: { classification: string; anonymized: boolean; confidence: number };
-	geo?: { countryCode?: string };
-}
-
 export interface AgentInput {
 	ip: string;
 	userAgent: string;
@@ -30,13 +23,18 @@ export interface EdgeNetwork {
 	country?: string;
 	asn?: number;
 	asnName?: string;
+	vpnProvider?: string | null;
+	evidence?: string[];
 }
 
 export interface EdgeResult {
 	class: string;
+	// What the account may do at the edge: "monitor" never blocks. Absent from older apis.
+	mode?: string;
 	agent?: AgentResult | null;
 	network?: EdgeNetwork | null;
 	site?: { id: string; mode: string; policyVersion: number } | null;
+	degraded?: string[];
 }
 
 export interface SitePolicy {
@@ -103,10 +101,6 @@ async function call<T>(
 	return (await res.json()) as T;
 }
 
-function post<T>(cfg: Config, path: string, body: unknown): Promise<T> {
-	return call<T>(cfg, "POST", path, body, AbortSignal.timeout(cfg.timeoutMs));
-}
-
 function failureStatus(err: unknown): "error" | "timeout" {
 	const name = (err as Error)?.name;
 	return name === "TimeoutError" || name === "AbortError" ? "timeout" : "error";
@@ -148,31 +142,18 @@ async function cached<T>(
 	}
 }
 
-export async function checkAgent(
+// No site and CHECK_AGENT off: only the IP half is used, cached per IP for IP_TTL.
+function edgeCache(
 	cfg: Config,
-	ctx: ExecutionContext,
 	input: AgentInput,
-): Promise<Outcome<AgentResult>> {
-	const key = `/agent/${await sha256(`${input.ip}|${input.userAgent}`)}`;
-	return cached(ctx, key, cfg.agentTtl, () =>
-		post<AgentResult>(cfg, "/v1/agentscan/check", {
-			ip: input.ip,
-			user_agent: input.userAgent,
-			ja4: input.ja4,
-			headers: input.headers,
-			request_id: input.requestId,
-		}),
-	);
-}
-
-export async function lookupIp(
-	cfg: Config,
-	ctx: ExecutionContext,
-	ip: string,
-): Promise<Outcome<IpResult>> {
-	return cached(ctx, `/ip/${encodeURIComponent(ip)}`, cfg.ipTtl, () =>
-		post<IpResult>(cfg, "/v1/ip/lookup", { target: ip }),
-	);
+): { scope: string; ttl: number } {
+	if (!cfg.siteId && !cfg.checkAgent)
+		return { scope: `|${input.ip}`, ttl: cfg.ipTtl };
+	const ttl =
+		cfg.siteId || !cfg.checkIp
+			? cfg.agentTtl
+			: Math.min(cfg.agentTtl, cfg.ipTtl);
+	return { scope: `${cfg.siteId}|${input.ip}|${input.userAgent}`, ttl };
 }
 
 export async function checkEdge(
@@ -181,15 +162,15 @@ export async function checkEdge(
 	input: AgentInput,
 	signal: AbortSignal,
 ): Promise<Outcome<EdgeResult>> {
-	const hash = await sha256(`${cfg.siteId}|${input.ip}|${input.userAgent}`);
-	const key = `/edge/${hash}`;
-	return cached(ctx, key, cfg.agentTtl, () =>
-		call<EdgeResult>(
+	const { scope, ttl } = edgeCache(cfg, input);
+	const key = `/edge/${await sha256(scope)}`;
+	return cached(ctx, key, ttl, async () => {
+		const data = await call<EdgeResult>(
 			cfg,
 			"POST",
 			"/v1/edge/check",
 			{
-				site: cfg.siteId,
+				site: cfg.siteId || undefined,
 				ip: input.ip,
 				user_agent: input.userAgent,
 				ja4: input.ja4,
@@ -197,8 +178,16 @@ export async function checkEdge(
 				request_id: input.requestId,
 			},
 			signal,
-		),
-	);
+		);
+		// Without a site, a missing half that is in use fails open like a failed call.
+		const missing =
+			(cfg.checkAgent && !data.agent) || (cfg.checkIp && !data.network);
+		if (!cfg.siteId && missing)
+			throw new Error(
+				`ipscanner /v1/edge/check degraded ${(data.degraded ?? []).join(",")}`,
+			);
+		return data;
+	});
 }
 
 interface PolicyEntry {

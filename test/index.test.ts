@@ -15,32 +15,38 @@ const human = {
 	action: "allow",
 	signals: { network_origin: "residential_clean", anonymized: false },
 };
-const cleanIp = {
+const cleanNetwork = {
 	networkClass: "residential_clean",
+	anonymized: false,
 	riskScore: 3,
-	verdict: {
-		classification: "residential_clean",
-		anonymized: false,
-		confidence: 0.9,
-		method: "asn",
-	},
-	geo: { countryCode: "DE" },
+	provider: "Deutsche Telekom",
+	vpnProvider: null,
+	country: "DE",
+	asn: 3320,
+	asnName: "Deutsche Telekom AG",
 };
 
 const edgeHuman = {
 	class: "human",
 	agent: human,
-	network: {
-		networkClass: "residential_clean",
-		anonymized: false,
-		riskScore: 3,
-		provider: "Deutsche Telekom",
-		country: "DE",
-		asn: 3320,
-		asnName: "Deutsche Telekom AG",
-	},
+	network: cleanNetwork,
 	site: { id: "site_test", mode: "monitor", policyVersion: 1 },
 };
+
+// The edge check without a site, as the legacy path gets it.
+function legacyEdge(extra: Record<string, unknown> = {}) {
+	return {
+		class: "human",
+		agent: human,
+		network: cleanNetwork,
+		site: null,
+		...extra,
+	};
+}
+
+function blockingAgent(agentClass = "malicious_automation") {
+	return { ...human, class: agentClass, action: "block" };
+}
 
 function sitePolicy(
 	site: string,
@@ -67,8 +73,7 @@ interface Recorded {
 }
 
 let calls: Recorded[];
-let agentReply: () => Promise<Response>;
-let ipReply: () => Promise<Response>;
+let logs: unknown[][];
 let edgeReply: () => Promise<Response>;
 let policyReply: (site: string) => Promise<Response>;
 
@@ -84,9 +89,7 @@ function hang(signal?: AbortSignal | null): Promise<Response> {
 
 beforeEach(() => {
 	calls = [];
-	agentReply = () => json(human);
-	ipReply = () => json(cleanIp);
-	edgeReply = () => json(edgeHuman);
+	edgeReply = () => json(legacyEdge());
 	policyReply = (site) => json(sitePolicy(site, "monitor", {}));
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 		const req = new Request(input, init);
@@ -96,12 +99,14 @@ beforeEach(() => {
 			headers: req.headers,
 			body: await req.clone().text(),
 		});
-		if (req.url === `${API}/v1/agentscan/check`) return agentReply();
-		if (req.url === `${API}/v1/ip/lookup`) return ipReply();
 		if (req.url === `${API}/v1/edge/check`) return edgeReply();
 		const policy = req.url.match(/^https:\/\/[^/]+\/v1\/sites\/([^/]+)\/policy$/);
 		if (policy) return policyReply(decodeURIComponent(policy[1]));
 		return new Response("origin ok", { headers: { "X-Origin": "1" } });
+	});
+	logs = [];
+	vi.spyOn(console, "log").mockImplementation((...args) => {
+		logs.push(args);
 	});
 });
 
@@ -115,6 +120,17 @@ function apiCalls(): Recorded[] {
 
 function originCall(): Recorded | undefined {
 	return calls.find((c) => !c.url.startsWith(API));
+}
+
+function apiPaths(): string[] {
+	return apiCalls().map((c) => new URL(c.url).pathname);
+}
+
+function lastLog(): Record<string, unknown> {
+	const lines = logs
+		.map(([line]) => JSON.parse(String(line)))
+		.filter((l) => "decision" in l);
+	return lines[lines.length - 1];
 }
 
 async function send(
@@ -155,14 +171,15 @@ describe("monitor mode", () => {
 	});
 
 	it("does not block in monitor mode", async () => {
-		agentReply = () =>
-			json({ ...human, class: "malicious_automation", action: "block" });
+		edgeReply = () =>
+			json(legacyEdge({ class: "malicious_automation", agent: blockingAgent() }));
 		const res = await send("/", { ip: "203.0.113.2" });
 		expect(res.status).toBe(200);
 		expect(originCall()!.headers.get("x-ipscanner-action")).toBe("block");
+		expect(lastLog().decision).toBe("would_block");
 	});
 
-	it("sends the expected agentscan and lookup requests", async () => {
+	it("sends one edge check without a site", async () => {
 		await send("/", {
 			ip: "203.0.113.3",
 			init: {
@@ -170,26 +187,26 @@ describe("monitor mode", () => {
 					"Accept-Language": "en",
 					"Sec-Fetch-Mode": "navigate",
 					Cookie: "secret=1",
+					"CF-Ray": "ray3",
 				},
 			},
 		});
-		const agent = apiCalls().find((c) =>
-			c.url.endsWith("/v1/agentscan/check"),
-		)!;
-		expect(agent.method).toBe("POST");
-		expect(agent.headers.get("authorization")).toBe("Bearer test-key");
-		expect(agent.headers.get("content-type")).toBe("application/json");
-		expect(agent.headers.get("x-ipscanner-source")).toBe("cloudflare_worker");
-		expect(agent.headers.get("user-agent")).toBe(`ipscanner-cloudflare/${VERSION}`);
-		const body = JSON.parse(agent.body);
-		expect(body.ip).toBe("203.0.113.3");
-		expect(body.user_agent).toBe("Mozilla/5.0 test");
-		expect(body.headers).toEqual({
-			"accept-language": "en",
-			"sec-fetch-mode": "navigate",
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+		const edge = apiCalls()[0];
+		expect(edge.method).toBe("POST");
+		expect(edge.headers.get("authorization")).toBe("Bearer test-key");
+		expect(edge.headers.get("content-type")).toBe("application/json");
+		expect(edge.headers.get("x-ipscanner-source")).toBe("cloudflare_worker");
+		expect(edge.headers.get("user-agent")).toBe(`ipscanner-cloudflare/${VERSION}`);
+		expect(JSON.parse(edge.body)).toEqual({
+			ip: "203.0.113.3",
+			user_agent: "Mozilla/5.0 test",
+			headers: {
+				"accept-language": "en",
+				"sec-fetch-mode": "navigate",
+			},
+			request_id: "ray3",
 		});
-		const lookup = apiCalls().find((c) => c.url.endsWith("/v1/ip/lookup"))!;
-		expect(JSON.parse(lookup.body)).toEqual({ target: "203.0.113.3" });
 	});
 });
 
@@ -197,7 +214,8 @@ describe("enforce mode", () => {
 	const enforce = { MODE: "enforce" };
 
 	it("blocks when agentscan says block", async () => {
-		agentReply = () => json({ ...human, class: "ai_agent", action: "block" });
+		edgeReply = () =>
+			json(legacyEdge({ class: "ai_agent", agent: blockingAgent("ai_agent") }));
 		const res = await send("/", {
 			ip: "203.0.113.4",
 			vars: enforce,
@@ -208,10 +226,17 @@ describe("enforce mode", () => {
 		expect(body).toContain("Blocked by IPScanner edge guard");
 		expect(body).toContain("abc123");
 		expect(originCall()).toBeUndefined();
+		expect(lastLog().decision).toBe("block");
 	});
 
 	it("blocks classes listed in BLOCK_CLASSES", async () => {
-		agentReply = () => json({ ...human, class: "ai_agent", action: "flag" });
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					class: "ai_agent",
+					agent: { ...human, class: "ai_agent", action: "flag" },
+				}),
+			);
 		const res = await send("/", {
 			ip: "203.0.113.5",
 			vars: { ...enforce, BLOCK_CLASSES: "ai_agent, malicious_automation" },
@@ -220,25 +245,31 @@ describe("enforce mode", () => {
 	});
 
 	it("allows verified crawlers", async () => {
-		agentReply = () =>
-			json({
-				class: "known_bot",
-				confidence: 0.99,
-				action: "block",
-				signals: { allowlist_verified: true, allowlist_type: "search" },
-			});
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					class: "verified_bot",
+					agent: {
+						class: "known_bot",
+						confidence: 0.99,
+						action: "block",
+						signals: { allowlist_verified: true, allowlist_type: "search" },
+					},
+				}),
+			);
 		const res = await send("/", { ip: "203.0.113.6", vars: enforce });
 		expect(res.status).toBe(200);
 		expect(originCall()!.headers.get("x-ipscanner-class")).toBe("known_bot");
 	});
 
 	it("blocks anonymized traffic when BLOCK_ANONYMIZED is on", async () => {
-		ipReply = () =>
-			json({
-				...cleanIp,
-				networkClass: "vpn",
-				verdict: { ...cleanIp.verdict, anonymized: true },
-			});
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					class: "vpn",
+					network: { ...cleanNetwork, networkClass: "vpn", anonymized: true },
+				}),
+			);
 		const vars = { ...enforce, BLOCK_ANONYMIZED: "true" };
 		expect((await send("/", { ip: "203.0.113.7", vars })).status).toBe(403);
 		expect((await send("/", { ip: "203.0.113.7", vars: enforce })).status).toBe(
@@ -252,14 +283,81 @@ describe("enforce mode", () => {
 			["203.0.113.30", "hosting"],
 			["203.0.113.31", "relay"],
 		]) {
-			ipReply = () =>
-				json({
-					...cleanIp,
-					networkClass,
-					verdict: { ...cleanIp.verdict, anonymized: true },
-				});
+			edgeReply = () =>
+				json(
+					legacyEdge({
+						class: networkClass,
+						network: { ...cleanNetwork, networkClass, anonymized: true },
+					}),
+				);
 			expect((await send("/", { ip, vars })).status).toBe(200);
 		}
+	});
+});
+
+describe("api mode without a site", () => {
+	const enforce = { MODE: "enforce" };
+
+	it("never blocks when the api answers monitor", async () => {
+		const cases: [string, Record<string, unknown>, Partial<Env>][] = [
+			["203.0.113.40", { agent: blockingAgent() }, enforce],
+			[
+				"203.0.113.41",
+				{ agent: { ...human, class: "ai_agent", action: "flag" } },
+				{ ...enforce, BLOCK_CLASSES: "ai_agent" },
+			],
+			[
+				"203.0.113.42",
+				{ network: { ...cleanNetwork, networkClass: "vpn", anonymized: true } },
+				{ ...enforce, BLOCK_ANONYMIZED: "true" },
+			],
+		];
+		for (const [ip, verdict, vars] of cases) {
+			edgeReply = () => json(legacyEdge({ ...verdict, mode: "monitor" }));
+			calls = [];
+			const res = await send("/", { ip, vars });
+			expect(res.status).toBe(200);
+			expect(originCall()).toBeDefined();
+			expect(originCall()!.headers.get("x-ipscanner-status")).toBe("ok");
+			expect(lastLog()).toMatchObject({ decision: "would_block", mode: "monitor" });
+		}
+	});
+
+	it("blocks when the api answers enforce", async () => {
+		edgeReply = () =>
+			json(legacyEdge({ agent: blockingAgent(), mode: "enforce" }));
+		const res = await send("/", { ip: "203.0.113.43", vars: enforce });
+		expect(res.status).toBe(403);
+		expect(lastLog()).toMatchObject({ decision: "block", mode: "enforce" });
+	});
+
+	it("blocks as before when the api sends no mode", async () => {
+		edgeReply = () => json(legacyEdge({ agent: blockingAgent() }));
+		const res = await send("/", { ip: "203.0.113.44", vars: enforce });
+		expect(res.status).toBe(403);
+	});
+
+	it("does not block in MODE=monitor when the api answers enforce", async () => {
+		edgeReply = () =>
+			json(legacyEdge({ agent: blockingAgent(), mode: "enforce" }));
+		const res = await send("/", { ip: "203.0.113.45" });
+		expect(res.status).toBe(200);
+		expect(lastLog().decision).toBe("would_block");
+	});
+
+	it("keeps the mode a cached verdict was answered with", async () => {
+		edgeReply = () =>
+			json(legacyEdge({ agent: blockingAgent(), mode: "monitor" }));
+		expect((await send("/", { ip: "203.0.113.46", vars: enforce })).status).toBe(
+			200,
+		);
+		edgeReply = () =>
+			json(legacyEdge({ agent: blockingAgent(), mode: "enforce" }));
+		calls = [];
+		expect((await send("/", { ip: "203.0.113.46", vars: enforce })).status).toBe(
+			200,
+		);
+		expect(apiCalls()).toHaveLength(0);
 	});
 });
 
@@ -287,7 +385,7 @@ describe("fail open", () => {
 	});
 
 	it("forwards with status error when the API fails", async () => {
-		ipReply = () => json({ error: "server_error", message: "boom" }, 500);
+		edgeReply = () => json({ error: "server_error", message: "boom" }, 500);
 		const res = await send("/", {
 			ip: "203.0.113.9",
 			vars: { MODE: "enforce" },
@@ -296,6 +394,46 @@ describe("fail open", () => {
 		const h = originCall()!.headers;
 		expect(h.get("x-ipscanner-status")).toBe("error");
 		expect(h.get("x-ipscanner-risk")).toBeNull();
+	});
+
+	it("treats an answer missing an enabled half as a failed check", async () => {
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					agent: blockingAgent(),
+					network: null,
+					degraded: ["network"],
+				}),
+			);
+		const res = await send("/", {
+			ip: "203.0.113.32",
+			vars: { MODE: "enforce" },
+		});
+		expect(res.status).toBe(200);
+		const h = originCall()!.headers;
+		expect(h.get("x-ipscanner-status")).toBe("error");
+		expect(h.get("x-ipscanner-class")).toBeNull();
+		edgeReply = () => json(legacyEdge());
+		calls = [];
+		await send("/", { ip: "203.0.113.32" });
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+		expect(originCall()!.headers.get("x-ipscanner-status")).toBe("ok");
+	});
+
+	it("uses an answer whose missing half is turned off", async () => {
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					agent: blockingAgent(),
+					network: null,
+					degraded: ["network"],
+				}),
+			);
+		const res = await send("/", {
+			ip: "203.0.113.33",
+			vars: { MODE: "enforce", CHECK_IP: "false" },
+		});
+		expect(res.status).toBe(403);
 	});
 });
 
@@ -335,46 +473,111 @@ describe("passthrough", () => {
 		expect(apiCalls()).toHaveLength(0);
 	});
 
+	it("skips when both checks are off", async () => {
+		await send("/", {
+			ip: "203.0.113.34",
+			vars: { CHECK_AGENT: "false", CHECK_IP: "false" },
+		});
+		expect(apiCalls()).toHaveLength(0);
+		expect(originCall()!.headers.get("x-ipscanner-status")).toBe("skipped");
+	});
+
 	it("checks other methods", async () => {
 		await send("/api", {
 			ip: "203.0.113.15",
 			init: { method: "POST", body: "x=1" },
 		});
-		expect(apiCalls()).toHaveLength(2);
+		expect(apiCalls()).toHaveLength(1);
 		expect(originCall()!.method).toBe("POST");
 		expect(originCall()!.body).toBe("x=1");
 	});
 
-	it("runs only the enabled checks", async () => {
-		await send("/", { ip: "203.0.113.16", vars: { CHECK_IP: "false" } });
-		expect(apiCalls().map((c) => new URL(c.url).pathname)).toEqual([
-			"/v1/agentscan/check",
-		]);
-		expect(originCall()!.headers.get("x-ipscanner-network-class")).toBe(
-			"residential_clean",
-		);
+	it("uses only the IP half with CHECK_AGENT off", async () => {
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					agent: blockingAgent(),
+					network: { ...cleanNetwork, networkClass: "hosting", riskScore: 40 },
+				}),
+			);
+		const res = await send("/", {
+			ip: "203.0.113.35",
+			vars: { MODE: "enforce", CHECK_AGENT: "false" },
+		});
+		expect(res.status).toBe(200);
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+		const h = originCall()!.headers;
+		expect(h.get("x-ipscanner-class")).toBeNull();
+		expect(h.get("x-ipscanner-action")).toBeNull();
+		expect(h.get("x-ipscanner-confidence")).toBeNull();
+		expect(h.get("x-ipscanner-network-class")).toBe("hosting");
+		expect(h.get("x-ipscanner-risk")).toBe("40");
+		expect(h.get("x-ipscanner-country")).toBe("DE");
+	});
+
+	it("uses only the agent half with CHECK_IP off", async () => {
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					network: { ...cleanNetwork, networkClass: "vpn", anonymized: true },
+				}),
+			);
+		const res = await send("/", {
+			ip: "203.0.113.16",
+			vars: { MODE: "enforce", CHECK_IP: "false", BLOCK_ANONYMIZED: "true" },
+		});
+		expect(res.status).toBe(200);
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+		const h = originCall()!.headers;
+		expect(h.get("x-ipscanner-class")).toBe("human");
+		expect(h.get("x-ipscanner-network-class")).toBe("residential_clean");
+		expect(h.get("x-ipscanner-anonymized")).toBe("false");
+		expect(h.get("x-ipscanner-risk")).toBeNull();
+		expect(h.get("x-ipscanner-country")).toBeNull();
 	});
 });
 
 describe("caching", () => {
 	it("serves repeat visitors from cache", async () => {
 		await send("/", { ip: "203.0.113.17" });
-		expect(apiCalls()).toHaveLength(2);
+		expect(apiCalls()).toHaveLength(1);
 		calls = [];
 		await send("/other", { ip: "203.0.113.17" });
 		expect(apiCalls()).toHaveLength(0);
 		expect(originCall()!.headers.get("x-ipscanner-class")).toBe("human");
+		expect(lastLog().cache).toEqual({ agent: "hit", ip: "hit" });
 	});
 
 	it("does not cache failures", async () => {
-		agentReply = () => json({ error: "server_error" }, 500);
+		edgeReply = () => json({ error: "server_error" }, 500);
 		await send("/", { ip: "203.0.113.18" });
-		agentReply = () => json(human);
+		edgeReply = () => json(legacyEdge());
 		calls = [];
 		await send("/", { ip: "203.0.113.18" });
-		expect(apiCalls().map((c) => new URL(c.url).pathname)).toEqual([
-			"/v1/agentscan/check",
-		]);
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+	});
+
+	it("caches per IP and User-Agent", async () => {
+		await send("/", { ip: "203.0.113.36" });
+		calls = [];
+		await send("/", {
+			ip: "203.0.113.36",
+			init: { headers: { "User-Agent": "Other/1.0" } },
+		});
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+	});
+
+	it("caches per IP with CHECK_AGENT off", async () => {
+		const vars = { CHECK_AGENT: "false" };
+		await send("/", { ip: "203.0.113.37", vars });
+		calls = [];
+		await send("/", {
+			ip: "203.0.113.37",
+			vars,
+			init: { headers: { "User-Agent": "Other/1.0" } },
+		});
+		expect(apiCalls()).toHaveLength(0);
+		expect(lastLog().cache).toEqual({ ip: "hit" });
 	});
 });
 
@@ -408,12 +611,10 @@ describe("routing", () => {
 });
 
 describe("legacy path", () => {
-	it("makes the two legacy calls when SITE_ID is unset", async () => {
+	it("makes exactly one edge check when SITE_ID is unset", async () => {
 		await send("/", { ip: "203.0.113.21", vars: { SITE_ID: "" } });
-		expect(apiCalls().map((c) => new URL(c.url).pathname).sort()).toEqual([
-			"/v1/agentscan/check",
-			"/v1/ip/lookup",
-		]);
+		expect(apiPaths()).toEqual(["/v1/edge/check"]);
+		expect("site" in JSON.parse(apiCalls()[0].body)).toBe(false);
 		const h = originCall()!.headers;
 		expect(h.get("x-ipscanner-traffic-class")).toBeNull();
 		expect(h.get("x-ipscanner-site")).toBeNull();
@@ -439,6 +640,7 @@ describe("sites", () => {
 
 	beforeEach(() => {
 		site = `site_test${++n}`;
+		edgeReply = () => json(edgeHuman);
 		now = 1_800_000_000_000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 	});
@@ -682,6 +884,54 @@ describe("sites", () => {
 		expect(body).toContain("Blocked by IPScanner edge guard");
 		expect(body).toContain("ray403");
 		expect(originCall()).toBeUndefined();
+	});
+
+	it("never blocks when the api answers monitor", async () => {
+		policyReply = (s) =>
+			json(
+				sitePolicy(s, "enforce", { malicious_automation: "block", vpn: "flag" }),
+			);
+		edgeReply = () =>
+			json({ ...edgeVerdict("malicious_automation"), mode: "monitor" });
+		const res = await send("/", { ip: nextIp(), vars: vars() });
+		expect(res.status).toBe(200);
+		expect(originCall()).toBeDefined();
+		expect(lastLog()).toMatchObject({ decision: "would_block", mode: "monitor" });
+		edgeReply = () => json({ ...edgeVerdict("vpn", "human"), mode: "monitor" });
+		calls = [];
+		await send("/", { ip: nextIp(), vars: vars() });
+		expect(lastLog().decision).toBe("would_flag");
+	});
+
+	it("blocks when the api answers enforce", async () => {
+		policyReply = (s) =>
+			json(sitePolicy(s, "enforce", { malicious_automation: "block" }));
+		edgeReply = () =>
+			json({ ...edgeVerdict("malicious_automation"), mode: "enforce" });
+		expect((await send("/", { ip: nextIp(), vars: vars() })).status).toBe(403);
+		expect(lastLog()).toMatchObject({ decision: "block", mode: "enforce" });
+	});
+
+	it("does not block a monitor policy when the api answers enforce", async () => {
+		policyReply = (s) =>
+			json(sitePolicy(s, "monitor", { malicious_automation: "block" }));
+		edgeReply = () =>
+			json({ ...edgeVerdict("malicious_automation"), mode: "enforce" });
+		expect((await send("/", { ip: nextIp(), vars: vars() })).status).toBe(200);
+	});
+
+	it("keeps the mode a cached verdict was answered with", async () => {
+		const ip = nextIp();
+		policyReply = (s) =>
+			json(sitePolicy(s, "enforce", { malicious_automation: "block" }));
+		edgeReply = () =>
+			json({ ...edgeVerdict("malicious_automation"), mode: "monitor" });
+		expect((await send("/", { ip, vars: vars() })).status).toBe(200);
+		edgeReply = () =>
+			json({ ...edgeVerdict("malicious_automation"), mode: "enforce" });
+		calls = [];
+		expect((await send("/", { ip, vars: vars() })).status).toBe(200);
+		expect(edgeCalls()).toHaveLength(0);
 	});
 
 	it("flags in enforce mode", async () => {
