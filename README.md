@@ -10,7 +10,7 @@ A Cloudflare Worker that sits in front of your site and checks every visitor wit
 - **Enforce mode** also returns a 403 to visitors that Agentscan marks as `block`, that fall into a blocked class, or (optionally) that come through a VPN, proxy or Tor.
 - With `SITE_ID` set, mode and per class policy come from the [IPScanner dashboard](https://ipscanner.io/dashboard/sites), where the site's traffic shows up.
 - Verified search engines and AI crawlers on the Agentscan allowlist are never blocked.
-- Both checks run in parallel, are cached with the Cache API, and fail open: if the API is slow or unreachable, the request goes through unchanged.
+- Both checks run in one API call, are cached with the Cache API, and fail open: if the API is slow or unreachable, the request goes through unchanged.
 - Incoming `X-IPScanner-*` headers are stripped, so clients cannot spoof a verdict.
 - One JSON log line per checked request, ready for Workers Logs.
 
@@ -56,13 +56,13 @@ All values are strings in the `vars` block of `wrangler.jsonc`.
 | ------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `IPSCANNER_API_KEY` |                        | Secret. Your API key.                                                                                                 |
 | `MODE`              | `monitor`              | `monitor` annotates only. `enforce` also blocks.                                                                      |
-| `CHECK_AGENT`       | `true`                 | Run Agentscan (`POST /v1/agentscan/check`).                                                                           |
-| `CHECK_IP`          | `true`                 | Run IP Detection (`POST /v1/ip/lookup`).                                                                              |
+| `CHECK_AGENT`       | `true`                 | Use the Agentscan verdict from `POST /v1/edge/check`.                                                                 |
+| `CHECK_IP`          | `true`                 | Use the IP Detection verdict from `POST /v1/edge/check`.                                                              |
 | `BLOCK_CLASSES`     | `malicious_automation` | Comma separated Agentscan classes to block in enforce mode: `human`, `known_bot`, `ai_agent`, `malicious_automation`. |
 | `BLOCK_ANONYMIZED`  | `false`                | In enforce mode, also block VPN, proxy and Tor traffic.                                                               |
 | `TIMEOUT_MS`        | `1500`                 | Timeout per API call. On timeout the request is forwarded.                                                            |
-| `AGENT_TTL`         | `600`                  | Seconds to cache an Agentscan verdict (the edge check verdict with `SITE_ID`) per IP and User-Agent.                  |
-| `IP_TTL`            | `3600`                 | Seconds to cache an IP lookup per IP.                                                                                 |
+| `AGENT_TTL`         | `600`                  | Seconds to cache the edge check verdict per IP and User-Agent.                                                        |
+| `IP_TTL`            | `3600`                 | Seconds to cache the verdict per IP when `CHECK_AGENT` is `false`. With both checks on, the shorter TTL applies.      |
 | `SKIP_PATHS`        | static assets          | Case insensitive regex on the path. Matching requests are not checked. Empty checks everything.                       |
 | `ORIGIN_URL`        | empty                  | Backend to forward to. Leave empty on a route.                                                                        |
 | `IPSCANNER_API_URL` | `https://ipscanner.io` | API base URL.                                                                                                         |
@@ -117,7 +117,7 @@ Each checked request writes one JSON line with `ip`, `path`, `class`, `action`, 
 
 ## Cost
 
-Each uncached visitor uses 1 request unit per enabled check, so 2 units with both checks on. Repeat visits within `AGENT_TTL` and `IP_TTL` are served from the cache. The Cache API is local to each Cloudflare data center, so a visitor seen in one location is checked again in another. Raise the TTLs, narrow the route, or turn off one check to reduce usage. With `SITE_ID`, the single edge check also costs 2 units per uncached visitor.
+Each uncached visitor costs one call to `POST /v1/edge/check`, 2 request units, with or without `SITE_ID`. Repeat visits within the TTL are served from the cache. The Cache API is local to each Cloudflare data center, so a visitor seen in one location is checked again in another. Raise the TTLs or narrow the route to reduce usage.
 
 ## Develop locally
 
