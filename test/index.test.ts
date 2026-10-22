@@ -435,6 +435,29 @@ describe("fail open", () => {
 		});
 		expect(res.status).toBe(403);
 	});
+
+	it("drops verdict values a header cannot carry", async () => {
+		edgeReply = () =>
+			json(
+				legacyEdge({
+					agent: { ...human, class: "human\r\nX-Injected: 1" },
+					network: {
+						...cleanNetwork,
+						country: "D\0E",
+						networkClass: "vpn·",
+					},
+				}),
+			);
+		const res = await send("/", { ip: "203.0.113.23" });
+		expect(res.status).toBe(200);
+		const h = originCall()!.headers;
+		expect(h.get("x-ipscanner-status")).toBe("ok");
+		expect(h.get("x-ipscanner-class")).toBeNull();
+		expect(h.get("x-ipscanner-country")).toBeNull();
+		expect(h.get("x-ipscanner-network-class")).toBeNull();
+		expect(h.get("x-ipscanner-action")).toBe("allow");
+		expect(h.get("x-injected")).toBeNull();
+	});
 });
 
 describe("passthrough", () => {

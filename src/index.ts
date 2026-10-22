@@ -123,6 +123,16 @@ export function shouldBlock(
 // VPN, proxy and Tor.
 const MASKING = new Set(["vpn", "residential_proxy", "tor"]);
 
+// Verdict values come from the API: drop one that is not printable ASCII.
+function setVerdictHeader(
+	headers: Headers,
+	name: string,
+	value: unknown,
+): void {
+	const text = String(value);
+	if (/^[\x20-\x7e]*$/.test(text)) headers.set(name, text);
+}
+
 function annotate(
 	headers: Headers,
 	agent?: AgentResult,
@@ -134,15 +144,17 @@ function annotate(
 	const anonymized =
 		network?.anonymized === true || agent?.signals?.anonymized === true;
 	if (agent) {
-		headers.set("X-IPScanner-Class", agent.class);
-		headers.set("X-IPScanner-Action", agent.action);
-		headers.set("X-IPScanner-Confidence", String(agent.confidence));
+		setVerdictHeader(headers, "X-IPScanner-Class", agent.class);
+		setVerdictHeader(headers, "X-IPScanner-Action", agent.action);
+		setVerdictHeader(headers, "X-IPScanner-Confidence", agent.confidence);
 	}
-	if (networkClass) headers.set("X-IPScanner-Network-Class", networkClass);
+	if (networkClass)
+		setVerdictHeader(headers, "X-IPScanner-Network-Class", networkClass);
 	headers.set("X-IPScanner-Anonymized", String(anonymized));
 	if (typeof network?.riskScore === "number")
 		headers.set("X-IPScanner-Risk", String(network.riskScore));
-	if (network?.country) headers.set("X-IPScanner-Country", network.country);
+	if (network?.country)
+		setVerdictHeader(headers, "X-IPScanner-Country", network.country);
 	return networkClass;
 }
 
@@ -207,7 +219,8 @@ async function checkSite(
 	const verdict = outcome.data;
 	const agent = verdict.agent ?? undefined;
 	const networkClass = annotate(headers, agent, verdict.network ?? undefined);
-	if (verdict.class) headers.set("X-IPScanner-Traffic-Class", verdict.class);
+	if (verdict.class)
+		setVerdictHeader(headers, "X-IPScanner-Traffic-Class", verdict.class);
 	headers.set("X-IPScanner-Site", cfg.siteId);
 	headers.set("X-IPScanner-Status", "ok");
 
