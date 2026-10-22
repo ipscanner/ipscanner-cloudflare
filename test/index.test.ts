@@ -590,6 +590,19 @@ describe("routing", () => {
 		expect(originCall()!.url).toBe("https://backend.example.net/path?q=1");
 	});
 
+	it("keeps paths that look like another host on ORIGIN_URL", async () => {
+		for (const path of ["//evil.example/x?q=1", "/\\evil.example/x?q=1"]) {
+			calls = [];
+			await send(path, {
+				ip: "203.0.113.22",
+				vars: { ORIGIN_URL: "https://backend.example.net" },
+			});
+			expect(originCall()!.url).toBe(
+				"https://backend.example.net//evil.example/x?q=1",
+			);
+		}
+	});
+
 	it("shows the setup page on workers.dev without an origin", async () => {
 		const ctx = createExecutionContext();
 		const req = new Request(

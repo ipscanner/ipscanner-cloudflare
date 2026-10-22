@@ -71,9 +71,13 @@ function forward(
 ): Promise<Response> | Response {
 	if (!cfg.originUrl && isPreviewHost(url.hostname))
 		return preview(cfg, headers);
-	const target = cfg.originUrl
-		? new URL(url.pathname + url.search, cfg.originUrl)
-		: url;
+	let target = url;
+	if (cfg.originUrl) {
+		// Assigned, not resolved: a "//host/..." path must not replace the origin host.
+		target = new URL(cfg.originUrl);
+		target.pathname = url.pathname;
+		target.search = url.search;
+	}
 	return fetch(new Request(target, new Request(request, { headers })));
 }
 
