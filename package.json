@@ -41,10 +41,10 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "0.22.0",
-		"@playwright/test": "1.63.0",
-		"typescript": "5.9.3",
-		"vitest": "4.1.11",
-		"wrangler": "4.147.0"
+		"@cloudflare/vitest-pool-workers": "0.23.0",
+		"@playwright/test": "1.64.1",
+		"typescript": "7.0.2",
+		"vitest": "5.0.5",
+		"wrangler": "4.151.2"
 	}
 }
