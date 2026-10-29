@@ -41,11 +41,11 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-plugin": "1.4.5",
+		"@cloudflare/vitest-plugin": "1.4.7",
 		"@playwright/test": "1.64.1",
 		"fast-check": "4.10.2",
 		"typescript": "7.0.2",
 		"vitest": "5.0.5",
-		"wrangler": "4.151.2"
+		"wrangler": "4.152.0"
 	}
 }
